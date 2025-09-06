@@ -23,7 +23,7 @@ from pydub import AudioSegment
 INPUT_FILE = "intermediate_steps_mp3/step1_output.mp3"
 OUTPUT_FILE = "outputs/this_sound.h"
 
-TARGET_SR = 16000
+TARGET_SR = 32000
 LPF_CUTOFF_HZ = 5000
 HEADER_ARRAY_LINE_WIDTH = 20
 CARRIER_HZ = 2000   # carrier frequency for modulation (center ~2 kHz)

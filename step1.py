@@ -1,42 +1,36 @@
 #!/usr/bin/env python3
-"""
-step1.py
-
-- Input:  hello.mp3
-- Output: intermediate_steps_mp3/step1_output.mp3
-- Also saves waveform plots in imgs/step1_imgs/
-- Processing:
-    * Load mono, resample to 16 kHz
-    * Remove silence based on RMS threshold
-    * Normalize to RMS target
-    * Apply small frequency shift (~200 Hz)
-    * Save as 8-bit PCM MP3
-"""
-
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from pydub import AudioSegment, effects
-from scipy.signal import hilbert
+from scipy.signal import butter, sosfilt
 
 # ---------------------- Parameters ----------------------
-RMS_THRESHOLD = 0.032      # threshold for silence removal
-MIN_SILENCE_MS = 400       # minimum silence duration to remove
-TARGET_SR = 16000          # resample rate
-SHIFT_HZ = 200             # small frequency shift
+TARGET_SR = 32000
+RMS_THRESHOLD = 0.055
+MIN_SILENCE_MS = 400# Divide 80–4000 Hz into 4 subbands
+SUBBANDS = [
+    (80,   640),   # center 360
+    (640,  1200),  # center 920
+    (1200, 1760),  # center 1480
+    (1760, 2320),  # center 2040
+    (2320, 2880),  # center 2600
+    (2880, 3440),  # center 3160
+    (3440, 4000)   # center 3720
+]
+CARRIERS = [1850, 1950, 2100, 2250, 2450, 2700, 2950]  # Hz
+
 # --------------------------------------------------------
 
-# Ensure directories exist
 os.makedirs("intermediate_steps_mp3", exist_ok=True)
 os.makedirs("imgs/step1_imgs", exist_ok=True)
 
 # --- Load audio ---
-orig = AudioSegment.from_file("hello.mp3").set_channels(1).set_frame_rate(TARGET_SR)
+orig = AudioSegment.from_file("femail.mp3").set_channels(1).set_frame_rate(TARGET_SR)
 samples = np.array(orig.get_array_of_samples()).astype(np.float32)
+samples /= np.max(np.abs(samples) + 1e-9)  # normalize to -1..1
+frame_rate = TARGET_SR
 
-# Normalize to -1..1 based on sample width
-norm_factor = float(2 ** (8 * orig.sample_width - 1))
-samples = samples / norm_factor
 
 # --- Silence removal using RMS ---
 def remove_silence_rms(samples, sr, threshold=0.055, min_silence_ms=400):
@@ -48,80 +42,88 @@ def remove_silence_rms(samples, sr, threshold=0.055, min_silence_ms=400):
     diff = np.diff(silent_mask.astype(int))
     starts = np.where(diff == 1)[0] + 1
     ends = np.where(diff == -1)[0] + 1
-
     if silent_mask[0]:
         starts = np.concatenate(([0], starts))
     if silent_mask[-1]:
         ends = np.concatenate((ends, [len(samples)]))
 
     min_silence_samples = int(sr * min_silence_ms / 1000)
-    keep_mask = np.ones_like(samples, dtype=bool)
+    keep = np.ones(len(samples), dtype=bool)
     for s, e in zip(starts, ends):
         if (e - s) >= min_silence_samples:
-            keep_mask[s:e] = False
+            keep[s:e] = False
+    return samples[keep]
 
-    return samples[keep_mask]
 
-samples_working = remove_silence_rms(samples, TARGET_SR, RMS_THRESHOLD, MIN_SILENCE_MS)
+samples_working = remove_silence_rms(samples, frame_rate, RMS_THRESHOLD, MIN_SILENCE_MS)
 print(f"Silence removed: {len(samples)} -> {len(samples_working)} samples")
 
-# --- Normalize by RMS ---
-rms = np.sqrt(np.mean(samples_working**2))
-target_rms = 0.1
-samples_working = samples_working * (target_rms / (rms + 1e-9))
 
-# --- Apply small frequency shift ---
-t = np.arange(len(samples_working)) / TARGET_SR
-analytic = hilbert(samples_working)
-shifted = np.real(analytic * np.exp(1j * 2 * np.pi * SHIFT_HZ * t))
+# --- Bandpass helper ---
+def bandpass(data, fs, low, high, order=6):
+    ny = 0.5 * fs
+    sos = butter(order, [low/ny, high/ny], btype="band", output="sos")
+    return sosfilt(sos, data)
 
-# --- Convert to 8-bit PCM ---
-shifted = shifted / np.max(np.abs(shifted)) * 127
-shifted_int8 = shifted.astype(np.int8).tobytes()
 
+# --- Multiband modulation ---
+t = np.arange(len(samples_working)) / frame_rate
+out = np.zeros_like(samples_working)
+
+for (low, high), fc in zip(SUBBANDS, CARRIERS):
+    band = bandpass(samples_working, frame_rate, low, high)
+    shifted = band * np.cos(2 * np.pi * fc * t)
+    out += shifted
+
+# --- Normalize ---
+out = out / (np.max(np.abs(out)) + 1e-9) * 0.9  # headroom
+
+# --- Convert back to AudioSegment ---
+out_int8 = (out * 127).astype(np.int8).tobytes()
 processed_segment = AudioSegment(
-    data=shifted_int8,
+    data=out_int8,
     sample_width=1,
     frame_rate=TARGET_SR,
     channels=1,
 )
 processed_segment = effects.normalize(processed_segment)
 
-# Save MP3
+# --- Save to MP3 ---
 output_path = "intermediate_steps_mp3/step1_output.mp3"
 processed_segment.export(output_path, format="mp3", bitrate="64k")
-print(f"Processed & shifted audio saved at {output_path}")
+print(f"Processed & spread audio saved at {output_path}")
+
 
 # --- Visualization ---
 def to_numpy_for_plot(seg):
     arr = np.array(seg.set_channels(1).get_array_of_samples())
     sw = seg.sample_width
-    denom = float(2 ** (8*sw - 1))
+    denom = float(2 ** (8 * sw - 1))
     return arr / denom, seg.frame_rate
+
 
 orig_np, orig_sr = to_numpy_for_plot(orig)
 proc_np, proc_sr = to_numpy_for_plot(processed_segment)
-
 orig_t = np.linspace(0, len(orig_np)/orig_sr, num=len(orig_np))
 proc_t = np.linspace(0, len(proc_np)/proc_sr, num=len(proc_np))
 
 # Waveforms
-plt.figure(figsize=(14, 8))
-plt.subplot(2, 1, 1)
+plt.figure(figsize=(14,8))
+plt.subplot(2,1,1)
 plt.plot(orig_t, orig_np, linewidth=0.5)
 plt.title("Original hello.mp3")
 plt.xlabel("Time (s)"); plt.ylabel("Amplitude")
 
-plt.subplot(2, 1, 2)
+plt.subplot(2,1,2)
 plt.plot(proc_t, proc_np, linewidth=0.5, color="green")
-plt.title(f"Processed (Shifted by {SHIFT_HZ} Hz, Silence Removed, RMS Norm)")
+plt.title("Processed (Multiband Spread near 2–3 kHz)")
 plt.xlabel("Time (s)"); plt.ylabel("Amplitude")
 plt.tight_layout()
 plt.savefig("imgs/step1_imgs/waveforms.png")
 plt.close()
 
 # Overlapped
-plt.figure(figsize=(14, 4))
+plt.figure(figsize=(14,4))
 plt.plot(orig_t, orig_np, alpha=0.5, label="Original", linewidth=0.5)
 plt.plot(proc_t, proc_np, alpha=0.7, label="Processed", linewidth=0.5, color="green")
 plt.title("Overlapped Waveforms")
