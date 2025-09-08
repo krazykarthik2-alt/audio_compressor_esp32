@@ -26,7 +26,7 @@ os.makedirs("intermediate_steps_mp3", exist_ok=True)
 os.makedirs("imgs/step1_imgs", exist_ok=True)
 
 # --- Load audio ---
-orig = AudioSegment.from_file("femail.mp3").set_channels(1).set_frame_rate(TARGET_SR)
+orig = AudioSegment.from_file("salaar.mp3").set_channels(1).set_frame_rate(TARGET_SR)
 samples = np.array(orig.get_array_of_samples()).astype(np.float32)
 samples /= np.max(np.abs(samples) + 1e-9)  # normalize to -1..1
 frame_rate = TARGET_SR
@@ -57,6 +57,8 @@ def remove_silence_rms(samples, sr, threshold=0.055, min_silence_ms=400):
 
 samples_working = remove_silence_rms(samples, frame_rate, RMS_THRESHOLD, MIN_SILENCE_MS)
 print(f"Silence removed: {len(samples)} -> {len(samples_working)} samples")
+# --- Time vector ---
+t = np.arange(len(samples_working)) / frame_rate
 
 
 # --- Bandpass helper ---
@@ -65,18 +67,23 @@ def bandpass(data, fs, low, high, order=6):
     sos = butter(order, [low/ny, high/ny], btype="band", output="sos")
     return sosfilt(sos, data)
 
-
-# --- Multiband modulation ---
-t = np.arange(len(samples_working)) / frame_rate
+# --- Multiband AM using only carrier frequencies ---
 out = np.zeros_like(samples_working)
-
 for (low, high), fc in zip(SUBBANDS, CARRIERS):
+    # extract band
     band = bandpass(samples_working, frame_rate, low, high)
-    shifted = band * np.cos(2 * np.pi * fc * t)
+    
+    # compute envelope (abs(hilbert) or simple rectification + smoothing)
+    envelope = np.abs(band)
+    
+    # modulate carrier
+    shifted = envelope * np.cos(2 * np.pi * fc * t)
+    
+    # add to output
     out += shifted
 
 # --- Normalize ---
-out = out / (np.max(np.abs(out)) + 1e-9) * 0.9  # headroom
+out = out / (np.max(np.abs(out)) + 1e-9) * 0.9
 
 # --- Convert back to AudioSegment ---
 out_int8 = (out * 127).astype(np.int8).tobytes()
@@ -91,7 +98,7 @@ processed_segment = effects.normalize(processed_segment)
 # --- Save to MP3 ---
 output_path = "intermediate_steps_mp3/step1_output.mp3"
 processed_segment.export(output_path, format="mp3", bitrate="64k")
-print(f"Processed & spread audio saved at {output_path}")
+print(f"Processed carrier-only audio saved at {output_path}")
 
 
 # --- Visualization ---
@@ -133,3 +140,15 @@ plt.savefig("imgs/step1_imgs/overlap.png")
 plt.close()
 
 print("Graphs saved in imgs/step1_imgs/")
+
+# --- Spectrogram ---
+plt.figure(figsize=(14, 6))
+plt.specgram(proc_np, NFFT=1024, Fs=proc_sr, noverlap=512, cmap="inferno")
+plt.colorbar(label="Intensity (dB)")
+plt.title("Spectrogram of Processed Audio")
+plt.xlabel("Time (s)")
+plt.ylabel("Frequency (Hz)")
+plt.ylim(0, proc_sr // 2)  # up to Nyquist
+plt.tight_layout()
+plt.savefig("imgs/step1_imgs/spectogram.png")
+plt.close()
